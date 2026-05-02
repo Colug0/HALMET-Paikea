@@ -77,7 +77,7 @@ const adsGain_t kADS1115Gain = GAIN_ONE;
 // Callback funktions for i2c sensors
 float read_temp_callback() { return (bmp.readTemperature() + 273.15); } //convert value to Kelvin
 float read_press_callback() { return (bmp.readPressure()); }
-float read_humid_callback() { float humidityValue;  sht4.update();   humidityValue = sht4.humidity;  return (humidityValue); }
+float read_humid_callback() { float humidityValue;  sht4.update();   humidityValue = (sht4.humidity)/100;  return (humidityValue); }
 
 
 /////////////////////////////////////////////////////////////////////
@@ -106,7 +106,8 @@ void setup() {
   sensesp_app = (&builder)
                     ->set_hostname("halmet")
                     ->set_wifi("Paikea", "2001BestesBootderWelt!")
-                    ->set_sk_server("192.168.88.100", 3000)
+                    //->set_sk_server("192.168.88.100", 3000)
+                    ->set_sk_server("halos.local", 4430)
                     // EDIT: Enable OTA updates with a password.
                     ->enable_ota("!HalmetSecretWiFiOTApass")
                     ->get_app();
@@ -197,13 +198,13 @@ void setup() {
   refrigerator_temp->connect_to(refrigerator_temp_calibration)
       ->connect_to(refrigerator_temp_sk_output);
 
-// Measure refrigerator temperature     
+// Measure engine temperature     
 auto engine_temp =
       new OneWireTemperature(dts, read_delay, "/engineTemperature/oneWire");
 
   ConfigItem(engine_temp)
-      ->set_title("engine Temperature")
-      ->set_description("Temperature of the engine")
+      ->set_title("engine Temperature(alternator)")
+      ->set_description("Temperature of the alternator on the engine")
       ->set_sort_order(100);
 
   auto engine_temp_calibration =
@@ -215,7 +216,7 @@ auto engine_temp =
       ->set_sort_order(200);
 
   auto engine_temp_sk_output = new SKOutputFloat(
-      "propulsion.0.engine.temperature", "/engineTemperature/skPath");
+      "propulsion.0.temperature", "/engineTemperature/skPath");
       
   ConfigItem(engine_temp_sk_output)
       ->set_title("engine Temperature Signal K Path")
@@ -248,7 +249,7 @@ auto engine_temp =
   ConfigItem(alternator_temp_sk_output)
       ->set_title("alternator Temperature Signal K Path")
       ->set_description("Signal K path for the alternator temperature")
-      ->set_sort_order(300);
+      ->set_sort_order(300);   
 
   alternator_temp->connect_to(alternator_temp_calibration)
       ->connect_to(alternator_temp_sk_output);
@@ -329,7 +330,7 @@ auto engine_temp =
   bool enable_signalk_output = true;
 
   // Connect the tank senders.
-  auto tank_a4_volume = ConnectTankSender(ads1115, 3, "Fuel", "fuel.main", 3000,
+  auto tank_a4_volume = ConnectTankSender(ads1115, 3, "Fuel", "fuel.0", 3000,
                                           enable_signalk_output);
 
 
@@ -339,7 +340,7 @@ auto engine_temp =
       "/Tanks/Fuel/NMEA 2000", 0, N2kft_Fuel, 150, nmea2000);
 
   ConfigItem(tank_a4_sender)
-      ->set_title("Tank A1 NMEA 2000")
+      ->set_title("Tank A4 NMEA 2000")
       ->set_description("NMEA 2000 tank sender for tank A4")
       ->set_sort_order(3005);
 
@@ -378,17 +379,17 @@ auto engine_temp =
   ///////////////////////////////////////////////////////////////////
   // Digital tacho inputs
 
-  // Connect the tacho senders. Engine name is "main".
-  auto tacho_d4_frequency = ConnectTachoSender(kDigitalInputPin4, "main");
+  // Connect the tacho senders. Engine name is "0".
+  auto tacho_d4_frequency = ConnectTachoSender(kDigitalInputPin4, "0");
 
   // Connect outputs to the N2k senders.
   N2kEngineParameterRapidSender* engine_rapid_sender =
-      new N2kEngineParameterRapidSender("/NMEA 2000/Engine 1 Rapid Update", 0,
-                                        nmea2000);  // Engine 1, instance 0
+      new N2kEngineParameterRapidSender("/NMEA 2000/Engine 0 Rapid Update", 0,
+                                        nmea2000);  // Engine 0, instance 0
 
   ConfigItem(engine_rapid_sender)
-      ->set_title("Engine 1 Rapid Update")
-      ->set_description("NMEA 2000 rapid update engine parameters for engine 1")
+      ->set_title("Engine 0 Rapid Update")
+      ->set_description("NMEA 2000 rapid update engine parameters for engine 0")
       ->set_sort_order(3015);
 
   tacho_d4_frequency->connect_to(&(engine_rapid_sender->engine_speed_));

@@ -10,6 +10,7 @@ using namespace sensesp;
 
 // Default RPM count scale factor, corresponds to 100 pulses per revolution.
 // This is rarely, if ever correct.
+//const float kDefaultFrequencyScale = 7.0;
 const float kDefaultFrequencyScale = 7.0;
 
 FloatProducer* ConnectTachoSender(int pin, String name) {
