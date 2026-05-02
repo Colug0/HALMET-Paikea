@@ -10,7 +10,7 @@ using namespace sensesp;
 
 // Default RPM count scale factor, corresponds to 100 pulses per revolution.
 // This is rarely, if ever correct.
-const float kDefaultFrequencyScale = 1 / 100.;
+const float kDefaultFrequencyScale = 7.0;
 
 FloatProducer* ConnectTachoSender(int pin, String name) {
   char config_path[80];
@@ -43,7 +43,7 @@ FloatProducer* ConnectTachoSender(int pin, String name) {
 
   tacho_input->connect_to(tacho_frequency);
 
-#ifdef ENABLE_SIGNALK
+//#ifdef ENABLE_SIGNALK
   snprintf(config_path, sizeof(config_path), "/Tacho %s/Revolutions SK Path",
            name.c_str());
   snprintf(sk_path, sizeof(sk_path), "propulsion.%s.revolutions", name.c_str());
@@ -59,7 +59,7 @@ FloatProducer* ConnectTachoSender(int pin, String name) {
       ->set_description(config_description);
 
   tacho_frequency->connect_to(tacho_frequency_sk_output);
-#endif
+//#endif
 
   return tacho_frequency;
 }

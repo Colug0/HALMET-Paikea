@@ -13,7 +13,7 @@ namespace halmet {
 const float kMeasurementCurrent = 0.01;
 
 // Default fuel tank size, in m3
-const float kTankDefaultSize = 120. / 1000;
+const float kTankDefaultSize = 150. / 1000;
 
 sensesp::FloatProducer* ConnectTankSender(Adafruit_ADS1115* ads1115,
                                           int channel, const String& name,

@@ -7,10 +7,9 @@
 // You can use this source file as a basis for your own projects.
 // Remove the parts that are not relevant to you, and add your own code
 // for external hardware libraries.
+#define ENABLE_SIGNALK
 
 #include <Adafruit_ADS1X15.h>
-#include <Adafruit_GFX.h>
-#include <Adafruit_SSD1306.h>
 #include <NMEA2000_esp32.h>
 
 #include "n2k_senders.h"
@@ -30,13 +29,20 @@
 #include "halmet_analog.h"
 #include "halmet_const.h"
 #include "halmet_digital.h"
-#include "halmet_display.h"
 #include "halmet_serial.h"
 #include "sensesp/net/http_server.h"
 #include "sensesp/net/networking.h"
+#include "sensesp_onewire/onewire_temperature.h"
+#include "M5UnitENV.h"
+#include "sensesp_nmea0183/nmea0183.h"
+#include "sensesp_nmea0183/wiring.h"
+
+
 
 using namespace sensesp;
 using namespace halmet;
+using namespace sensesp::onewire;
+using namespace sensesp::nmea0183;
 
 /////////////////////////////////////////////////////////////////////
 // Declare some global variables required for the firmware operation.
@@ -46,10 +52,12 @@ elapsedMillis n2k_time_since_rx = 0;
 elapsedMillis n2k_time_since_tx = 0;
 
 TwoWire* i2c;
-Adafruit_SSD1306* display;
 
-// Store alarm states in an array for local display output
-bool alarm_states[4] = {false, false, false, false};
+DallasTemperatureSensors* dts = new DallasTemperatureSensors(ONEWIRE_PIN);
+SHT4X sht4;
+BMP280 bmp;
+
+
 
 // Set the ADS1115 GAIN to adjust the analog input voltage range.
 // On HALMET, this refers to the voltage range of the ADS1115 input
@@ -65,22 +73,23 @@ bool alarm_states[4] = {false, false, false, false};
 const adsGain_t kADS1115Gain = GAIN_ONE;
 
 /////////////////////////////////////////////////////////////////////
-// Test output pin configuration. If ENABLE_TEST_OUTPUT_PIN is defined,
-// GPIO 33 will output a pulse wave at 380 Hz with a 50% duty cycle.
-// If this output and GND are connected to one of the digital inputs, it can
-// be used to test that the frequency counter functionality is working.
-#define ENABLE_TEST_OUTPUT_PIN
-#ifdef ENABLE_TEST_OUTPUT_PIN
-const int kTestOutputPin = GPIO_NUM_33;
-// With the default pulse rate of 100 pulses per revolution (configured in
-// halmet_digital.cpp), this frequency corresponds to 3.8 r/s or about 228 rpm.
-const int kTestOutputFrequency = 380;
-#endif
+// Functions
+// Callback funktions for i2c sensors
+float read_temp_callback() { return (bmp.readTemperature() + 273.15); } //convert value to Kelvin
+float read_press_callback() { return (bmp.readPressure()); }
+float read_humid_callback() { float humidityValue;  sht4.update();   humidityValue = sht4.humidity;  return (humidityValue); }
+
 
 /////////////////////////////////////////////////////////////////////
 // The setup function performs one-time application initialization.
 void setup() {
-  SetupLogging(ESP_LOG_DEBUG);
+  //SetupLogging(ESP_LOG_DEBUG);
+  //SetupLogging(ESP_LOG_NONE);
+  SetupLogging(ESP_LOG_VERBOSE);
+  
+  // Define how often SensESP should read the sensor(s) in milliseconds
+  uint read_delay = 1000; //Intervall for OneWire Sensors
+  unsigned int read_interval = 2000; // Intervall for environment Sensors (Temp, Humid and Baro)
 
   // These calls can be used for fine-grained control over the logging level.
   // esp_log_level_set("*", esp_log_level_t::ESP_LOG_DEBUG);
@@ -88,19 +97,18 @@ void setup() {
   Serial.begin(115200);
 
   /////////////////////////////////////////////////////////////////////
+  wifi_auth_mode_t auth = WIFI_AUTH_WPA_PSK;
+  WiFi.setMinSecurity(auth);
   // Initialize the application framework
 
   // Construct the global SensESPApp() object
   BUILDER_CLASS builder;
   sensesp_app = (&builder)
-                    // EDIT: Set a custom hostname for the app.
                     ->set_hostname("halmet")
-                    // EDIT: Optionally, hard-code the WiFi and Signal K server
-                    // settings. This is normally not needed.
-                    //->set_wifi("My WiFi SSID", "my_wifi_password")
-                    //->set_sk_server("192.168.10.3", 80)
+                    ->set_wifi("Paikea", "2001BestesBootderWelt!")
+                    ->set_sk_server("192.168.88.100", 3000)
                     // EDIT: Enable OTA updates with a password.
-                    //->enable_ota("my_ota_password")
+                    ->enable_ota("!HalmetSecretWiFiOTApass")
                     ->get_app();
 
   // initialize the I2C bus
@@ -113,16 +121,6 @@ void setup() {
   ads1115->setGain(kADS1115Gain);
   bool ads_initialized = ads1115->begin(kADS1115Address, i2c);
   debugD("ADS1115 initialized: %d", ads_initialized);
-
-#ifdef ENABLE_TEST_OUTPUT_PIN
-  pinMode(kTestOutputPin, OUTPUT);
-  // Set the LEDC peripheral to a 13-bit resolution
-  ledcAttach(kTestOutputPin, kTestOutputFrequency, 13);
-  // Set the duty cycle to 50%
-  // Duty cycle value is calculated based on the resolution
-  // For 13-bit resolution, max value is 8191, so 50% is 4096
-  ledcWrite(0, 4096);
-#endif
 
   /////////////////////////////////////////////////////////////////////
   // Initialize NMEA 2000 functionality
@@ -167,53 +165,198 @@ void setup() {
   // No need to parse the messages at every single loop iteration; 1 ms will do
   event_loop()->onRepeat(1, []() { nmea2000->ParseMessages(); });
 
-  // Initialize the OLED display
-  bool display_present = InitializeSSD1306(sensesp_app->get(), &display, i2c);
+  //////////////////////////////////////////
+  
+  // OneWire
+  // Measure refrigerator temperature
+  
+  auto refrigerator_temp =
+      new OneWireTemperature(dts, read_delay, "/refrigeratorTemperature/oneWire");
 
+  ConfigItem(refrigerator_temp)
+      ->set_title("Refrigerator Temperature")
+      ->set_description("Temperature of the refrigerator")
+      ->set_sort_order(100);
+
+  auto refrigerator_temp_calibration =
+      new Linear(1.0, 0.0, "/refrigeratorTemperature/linear");
+
+  ConfigItem(refrigerator_temp_calibration)
+      ->set_title("Refrigerator Temperature Calibration")
+      ->set_description("Calibration for the refrigerator temperature sensor")
+      ->set_sort_order(200);
+
+  auto refrigerator_temp_sk_output = new SKOutputFloat(
+      "environment.inside.refrigerator.temperature", "/refrigeratorTemperature/skPath");
+
+  ConfigItem(refrigerator_temp_sk_output)
+      ->set_title("refrigerator Temperature Signal K Path")
+      ->set_description("Signal K path for the refrigerator temperature")
+      ->set_sort_order(300);
+
+  refrigerator_temp->connect_to(refrigerator_temp_calibration)
+      ->connect_to(refrigerator_temp_sk_output);
+
+// Measure refrigerator temperature     
+auto engine_temp =
+      new OneWireTemperature(dts, read_delay, "/engineTemperature/oneWire");
+
+  ConfigItem(engine_temp)
+      ->set_title("engine Temperature")
+      ->set_description("Temperature of the engine")
+      ->set_sort_order(100);
+
+  auto engine_temp_calibration =
+      new Linear(1.0, 0.0, "/engineTemperature/linear");
+
+  ConfigItem(engine_temp_calibration)
+      ->set_title("engine Temperature Calibration")
+      ->set_description("Calibration for the engine temperature sensor")
+      ->set_sort_order(200);
+
+  auto engine_temp_sk_output = new SKOutputFloat(
+      "propulsion.0.engine.temperature", "/engineTemperature/skPath");
+      
+  ConfigItem(engine_temp_sk_output)
+      ->set_title("engine Temperature Signal K Path")
+      ->set_description("Signal K path for the engine temperature")
+      ->set_sort_order(300);
+
+  engine_temp->connect_to(engine_temp_calibration)
+      ->connect_to(engine_temp_sk_output);
+
+// Measure alternator temperature
+  auto alternator_temp =
+      new OneWireTemperature(dts, read_delay, "/alternatorTemperature/oneWire");
+
+  ConfigItem(alternator_temp)
+      ->set_title("alternator Temperature")
+      ->set_description("Temperature of the alternator")
+      ->set_sort_order(100);
+
+  auto alternator_temp_calibration =
+      new Linear(1.0, 0.0, "/alternatorTemperature/linear");
+
+  ConfigItem(alternator_temp_calibration)
+      ->set_title("alternator Temperature Calibration")
+      ->set_description("Calibration for the alternator temperature sensor")
+      ->set_sort_order(200);
+
+  auto alternator_temp_sk_output = new SKOutputFloat(
+      "electrical.alternator.temperature", "/AlternatorTemperatureTemperature/skPath");
+
+  ConfigItem(alternator_temp_sk_output)
+      ->set_title("alternator Temperature Signal K Path")
+      ->set_description("Signal K path for the alternator temperature")
+      ->set_sort_order(300);
+
+  alternator_temp->connect_to(alternator_temp_calibration)
+      ->connect_to(alternator_temp_sk_output);
+
+// I2C Sensor setup
+  // BMP280 -> Temperature and Pressure
+    if (!bmp.begin(i2c, BMP280_I2C_ADDR, 21, 22, 400000U)) {
+        Serial.println("Couldn't find BMP280");
+        while (1) delay(1);
+    }
+    bmp.setSampling(BMP280::MODE_NORMAL,     // Operating Mode. 
+                    BMP280::SAMPLING_X2,     // Temp. oversampling 
+                    BMP280::SAMPLING_X16,    // Pressure oversampling 
+                    BMP280::FILTER_X16,      // Filtering. 
+                    BMP280::STANDBY_MS_500); // Standby time. 
+  // SHT40 -> Humidity
+    if (!sht4.begin(i2c, SHT40_I2C_ADDR_44, 21, 22, 400000U)) {
+        Serial.println("Couldn't find SHT4x");
+        while (1) delay(1);
+    }
+    sht4.setPrecision(SHT4X_HIGH_PRECISION);
+    sht4.setHeater(SHT4X_NO_HEATER);
+
+  // Temperatur from bmp280
+  auto* inside_temp = new RepeatSensor<float>(read_interval, read_temp_callback);
+
+  auto inside_temp_sk_output = new SKOutputFloat(
+      "environment.inside.temperature", "/insideTemperature/skPath");
+
+  ConfigItem(inside_temp_sk_output)
+      ->set_title("inside Temperature Signal K Path")
+      ->set_description("Signal K path for the Temperature inside of the boat")
+      ->set_sort_order(300);
+
+  inside_temp->connect_to(inside_temp_sk_output);
+
+  // Pressure from bmp280
+  auto* inside_pressure = new RepeatSensor<float>(read_interval, read_press_callback);
+
+  auto inside_pressure_sk_output = new SKOutputFloat(
+      "environment.inside.pressure", "/insidePressure/skPath");
+  ConfigItem(inside_pressure_sk_output)
+      ->set_title("inside Pressure Signal K Path")
+      ->set_description("Signal K path for the Pressure inside of the boat")
+      ->set_sort_order(400);
+  inside_pressure->connect_to(inside_pressure_sk_output);
+
+  // Humidity from SHT40
+  auto* inside_humidity = new RepeatSensor<float>(read_interval, read_humid_callback);
+
+  auto inside_humidity_sk_output = new SKOutputFloat(
+      "environment.inside.relativeHumidity", "/insideHumidity/skPath");
+  ConfigItem(inside_humidity_sk_output)
+      ->set_title("inside Humidity Signal K Path")  
+      ->set_description("Signal K path for the Humidity inside of the boat")
+      ->set_sort_order(500);
+  inside_humidity->connect_to(inside_humidity_sk_output);
+
+
+  // GNSS
+
+  HardwareSerial* serial = &Serial1;
+  serial->begin(kGNSSBitRate, SERIAL_8N1, kGNSSRxPin, kGNSSTxPin);
+
+  NMEA0183IOTask* nmea0183_io_task = new NMEA0183IOTask(serial);
+
+  ConnectGNSS(&nmea0183_io_task->parser_, new GNSSData());
+
+  //event_loop()->onAvailable(Serial1, [](){Serial.write(Serial1.read());  });
+//while (Serial1.available()) {
+//    char c = Serial1.read();
+//    Serial.write(c); // Gibt das Zeichen direkt weiter
+//  }
+  
   ///////////////////////////////////////////////////////////////////
   // Analog inputs
-
+  
   bool enable_signalk_output = true;
 
   // Connect the tank senders.
-  // EDIT: To enable more tanks, uncomment the lines below.
-  auto tank_a1_volume = ConnectTankSender(ads1115, 0, "Fuel", "fuel.main", 3000,
+  auto tank_a4_volume = ConnectTankSender(ads1115, 3, "Fuel", "fuel.main", 3000,
                                           enable_signalk_output);
-  // auto tank_a2_volume = ConnectTankSender(ads1115, 1, "A2");
-  // auto tank_a3_volume = ConnectTankSender(ads1115, 2, "A3");
-  // auto tank_a4_volume = ConnectTankSender(ads1115, 3, "A4");
+
 
 #ifdef ENABLE_NMEA2000_OUTPUT
-  // Tank 1, instance 0. Capacity 200 liters. You can change the capacity
-  // in the web UI as well.
-  // EDIT: Make sure this matches your tank configuration above.
-  N2kFluidLevelSender* tank_a1_sender = new N2kFluidLevelSender(
-      "/Tanks/Fuel/NMEA 2000", 0, N2kft_Fuel, 200, nmea2000);
+  // Fuel Tank, instance 0. Capacity 150 liters. 
+  N2kFluidLevelSender* tank_a4_sender = new N2kFluidLevelSender(
+      "/Tanks/Fuel/NMEA 2000", 0, N2kft_Fuel, 150, nmea2000);
 
-  ConfigItem(tank_a1_sender)
+  ConfigItem(tank_a4_sender)
       ->set_title("Tank A1 NMEA 2000")
-      ->set_description("NMEA 2000 tank sender for tank A1")
+      ->set_description("NMEA 2000 tank sender for tank A4")
       ->set_sort_order(3005);
 
-  tank_a1_volume->connect_to(&(tank_a1_sender->tank_level_));
+  tank_a4_volume->connect_to(&(tank_a4_sender->tank_level_));
 #endif  // ENABLE_NMEA2000_OUTPUT
 
-  if (display_present) {
-    // EDIT: Duplicate the lines below to make the display show all your tanks.
-    tank_a1_volume->connect_to(new LambdaConsumer<float>(
-        [](float value) { PrintValue(display, 2, "Tank A1", 100 * value); }));
-  }
 
   // Read the voltage level of analog input A2
-  auto a2_voltage = new ADS1115VoltageInput(ads1115, 1, "/Voltage A2");
+   //example auto a2_voltage = new ADS1115VoltageInput(ads1115, 1, "/Voltage A2");
 
-  ConfigItem(a2_voltage)
-      ->set_title("Analog Voltage A2")
-      ->set_description("Voltage level of analog input A2")
-      ->set_sort_order(3000);
+   //example ConfigItem(a2_voltage)
+    //example    ->set_title("Analog Voltage A2")
+    //example    ->set_description("Voltage level of analog input A2")
+   //example     ->set_sort_order(3000);
 
-  a2_voltage->connect_to(new LambdaConsumer<float>(
-      [](float value) { debugD("Voltage A2: %f", value); }));
+   //example a2_voltage->connect_to(new LambdaConsumer<float>(
+  //example      [](float value) { debugD("Voltage A2: %f", value); }));
 
   // If you want to output something else than the voltage value,
   // you can insert a suitable transform here.
@@ -222,65 +365,23 @@ void setup() {
   // auto a2_distance = new Linear(0.17, 0.0);
   // a2_voltage->connect_to(a2_distance);
 
-  a2_voltage->connect_to(
-      new SKOutputFloat("sensors.a2.voltage", "Analog Voltage A2",
-                        new SKMetadata("V", "Analog Voltage A2")));
+  //example a2_voltage->connect_to(
+  //example     new SKOutputFloat("sensors.a2.voltage", "Analog Voltage A2",
+  //example                       new SKMetadata("V", "Analog Voltage A2")));
   // Example of how to output the distance value to Signal K.
   // a2_distance->connect_to(
   //     new SKOutputFloat("sensors.a2.distance", "Analog Distance A2",
   //                       new SKMetadata("m", "Analog Distance A2")));
 
-  ///////////////////////////////////////////////////////////////////
-  // Digital alarm inputs
 
-  // EDIT: More alarm inputs can be defined by duplicating the lines below.
-  // Make sure to not define a pin for both a tacho and an alarm.
-  auto alarm_d2_input = ConnectAlarmSender(kDigitalInputPin2, "D2");
-  auto alarm_d3_input = ConnectAlarmSender(kDigitalInputPin3, "D3");
-  // auto alarm_d4_input = ConnectAlarmSender(kDigitalInputPin4, "D4");
-
-  // Update the alarm states based on the input value changes.
-  // EDIT: If you added more alarm inputs, uncomment the respective lines below.
-  alarm_d2_input->connect_to(
-      new LambdaConsumer<bool>([](bool value) { alarm_states[1] = value; }));
-  // In this example, alarm_d3_input is active low, so invert the value.
-  auto alarm_d3_inverted = alarm_d3_input->connect_to(
-      new LambdaTransform<bool, bool>([](bool value) { return !value; }));
-  alarm_d3_inverted->connect_to(
-      new LambdaConsumer<bool>([](bool value) { alarm_states[2] = value; }));
-  // alarm_d4_input->connect_to(
-  //     new LambdaConsumer<bool>([](bool value) { alarm_states[3] = value; }));
-
-  // EDIT: This example connects the D2 alarm input to the low oil pressure
-  // warning. Modify according to your needs.
-  N2kEngineParameterDynamicSender* engine_dynamic_sender =
-      new N2kEngineParameterDynamicSender("/NMEA 2000/Engine 1 Dynamic", 0,
-                                          nmea2000);
-
-  ConfigItem(engine_dynamic_sender)
-      ->set_title("Engine 1 Dynamic")
-      ->set_description("NMEA 2000 dynamic engine parameters for engine 1")
-      ->set_sort_order(3010);
-
-  alarm_d2_input->connect_to(engine_dynamic_sender->low_oil_pressure_);
-
-  // This is just an example -- normally temperature alarms would not be
-  // active-low (inverted).
-  alarm_d3_inverted->connect_to(engine_dynamic_sender->over_temperature_);
-
-  // FIXME: Transmit the alarms over SK as well.
 
   ///////////////////////////////////////////////////////////////////
   // Digital tacho inputs
 
   // Connect the tacho senders. Engine name is "main".
-  // EDIT: More tacho inputs can be defined by duplicating the line below.
-  auto tacho_d1_frequency = ConnectTachoSender(kDigitalInputPin1, "main");
+  auto tacho_d4_frequency = ConnectTachoSender(kDigitalInputPin4, "main");
 
   // Connect outputs to the N2k senders.
-  // EDIT: Make sure this matches your tacho configuration above.
-  //       Duplicate the lines below to connect more tachos, but be sure to
-  //       use different engine instances.
   N2kEngineParameterRapidSender* engine_rapid_sender =
       new N2kEngineParameterRapidSender("/NMEA 2000/Engine 1 Rapid Update", 0,
                                         nmea2000);  // Engine 1, instance 0
@@ -290,31 +391,10 @@ void setup() {
       ->set_description("NMEA 2000 rapid update engine parameters for engine 1")
       ->set_sort_order(3015);
 
-  tacho_d1_frequency->connect_to(&(engine_rapid_sender->engine_speed_));
-
-  if (display_present) {
-    tacho_d1_frequency->connect_to(new LambdaConsumer<float>(
-        [](float value) { PrintValue(display, 3, "RPM D1", 60 * value); }));
-  }
+  tacho_d4_frequency->connect_to(&(engine_rapid_sender->engine_speed_));
 
   ///////////////////////////////////////////////////////////////////
-  // Display setup
 
-  // Connect the outputs to the display
-  if (display_present) {
-    event_loop()->onRepeat(1000, []() {
-      PrintValue(display, 1, "IP:", WiFi.localIP().toString());
-    });
-
-    // Create a poor man's "christmas tree" display for the alarms
-    event_loop()->onRepeat(1000, []() {
-      char state_string[5] = {};
-      for (int i = 0; i < 4; i++) {
-        state_string[i] = alarm_states[i] ? '*' : '_';
-      }
-      PrintValue(display, 4, "Alarm", state_string);
-    });
-  }
 
   // To avoid garbage collecting all shared pointers created in setup(),
   // loop from here.
