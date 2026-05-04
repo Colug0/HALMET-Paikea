@@ -107,7 +107,7 @@ void setup() {
                     ->set_hostname("halmet")
                     ->set_wifi("Paikea", "2001BestesBootderWelt!")
                     //->set_sk_server("192.168.88.100", 3000)
-                    ->set_sk_server("halos.local", 4430)
+                    ->set_sk_server("halos.local", 3000)
                     // EDIT: Enable OTA updates with a password.
                     ->enable_ota("!HalmetSecretWiFiOTApass")
                     ->get_app();
