@@ -1,10 +1,29 @@
-# HALMET Example Firmware
+# HALMET Firmware for Sailing Vessel Paikea
 
-This repository provides example firmware for [HALMET: Hat Labs Marine Engine & Tank interface](https://shop.hatlabs.fi/products/halmet).
+This repository is a modified fork of the example Firmware for halmet.
 
-To get started with the example firmware, follow the generic SensESP [Getting Started](https://signalk.org/SensESP/pages/getting_started/) instructions but use this repository instead of the SensESP Project Template.
+It uses the following sensors:
 
-By default, the example firmware is configured to read the engine RPM from input D1 and the fuel level from input A1. D2 is configured as a low oil pressure alarm input.
+## OneWire Sensors:
 
-To customize the software for your own purposes, edit the `src/main.cpp` file.
-Parts intended to be customized are marked with `EDIT:` comments.
+### Refrigerator Temperature: 
+Measures the temperature inside the refrigerator.
+### Engine Temperature: 
+Monitors the alternator's temperature on the engine.
+### Alternator Temperature: 
+Tracks the alternator's temperature.
+
+##I2C Sensors:
+
+### BMP280: 
+Measures inside temperature and pressure.
+### SHT40: 
+Measures inside humidity.
+
+## GNSS (GPS):
+
+Connects to a GNSS module for location data.
+
+## Analog Inputs:
+
+Fuel Tank Sensor: Monitors fuel levels.
