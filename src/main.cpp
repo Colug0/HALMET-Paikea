@@ -105,9 +105,9 @@ void setup() {
   BUILDER_CLASS builder;
   sensesp_app = (&builder)
                     ->set_hostname("halmet")
-                    ->set_wifi("Paikea", "2001BestesBootderWelt!")
+                    ->set_wifi_client("Paikea", "2001BestesBootderWelt!")
                     //->set_sk_server("192.168.88.100", 3000)
-                    ->set_sk_server("halos.local", 3000)
+                    ->set_sk_server("192.168.88.111", 3000)
                     // EDIT: Enable OTA updates with a password.
                     ->enable_ota("!HalmetSecretWiFiOTApass")
                     ->get_app();
@@ -169,10 +169,45 @@ void setup() {
   //////////////////////////////////////////
   
   // OneWire
-  // Measure refrigerator temperature
+  // assign thze sensors to the global variables
   
-  auto refrigerator_temp =
+    auto alternator_temp =
+      new OneWireTemperature(dts, read_delay, "/alternatorTemperature/oneWire");
+
+    auto refrigerator_temp =
       new OneWireTemperature(dts, read_delay, "/refrigeratorTemperature/oneWire");
+
+    auto engine_temp =
+      new OneWireTemperature(dts, read_delay, "/engineTemperature/oneWire");
+
+
+  // Measure engine temperature     
+
+  ConfigItem(engine_temp)
+      ->set_title("engine Temperature")
+      ->set_description("Temperature of the engine")
+      ->set_sort_order(100);
+
+  auto engine_temp_calibration =
+      new Linear(1.0, 0.0, "/engineTemperature/linear");
+
+  ConfigItem(engine_temp_calibration)
+      ->set_title("engine Temperature Calibration")
+      ->set_description("Calibration for the engine temperature sensor")
+      ->set_sort_order(200);
+
+  auto engine_temp_sk_output = new SKOutputFloat(
+      "propulsion.0.temperature", "/engineTemperature/skPath");
+      
+  ConfigItem(engine_temp_sk_output)
+      ->set_title("engine Temperature Signal K Path")
+      ->set_description("Signal K path for the engine temperature")
+      ->set_sort_order(300);
+
+  engine_temp->connect_to(engine_temp_calibration)
+      ->connect_to(engine_temp_sk_output);
+      
+  // Measure refrigerator temperature
 
   ConfigItem(refrigerator_temp)
       ->set_title("Refrigerator Temperature")
@@ -198,38 +233,9 @@ void setup() {
   refrigerator_temp->connect_to(refrigerator_temp_calibration)
       ->connect_to(refrigerator_temp_sk_output);
 
-// Measure engine temperature     
-auto engine_temp =
-      new OneWireTemperature(dts, read_delay, "/engineTemperature/oneWire");
 
-  ConfigItem(engine_temp)
-      ->set_title("engine Temperature(alternator)")
-      ->set_description("Temperature of the alternator on the engine")
-      ->set_sort_order(100);
-
-  auto engine_temp_calibration =
-      new Linear(1.0, 0.0, "/engineTemperature/linear");
-
-  ConfigItem(engine_temp_calibration)
-      ->set_title("engine Temperature Calibration")
-      ->set_description("Calibration for the engine temperature sensor")
-      ->set_sort_order(200);
-
-  auto engine_temp_sk_output = new SKOutputFloat(
-      "propulsion.0.temperature", "/engineTemperature/skPath");
-      
-  ConfigItem(engine_temp_sk_output)
-      ->set_title("engine Temperature Signal K Path")
-      ->set_description("Signal K path for the engine temperature")
-      ->set_sort_order(300);
-
-  engine_temp->connect_to(engine_temp_calibration)
-      ->connect_to(engine_temp_sk_output);
 
 // Measure alternator temperature
-  auto alternator_temp =
-      new OneWireTemperature(dts, read_delay, "/alternatorTemperature/oneWire");
-
   ConfigItem(alternator_temp)
       ->set_title("alternator Temperature")
       ->set_description("Temperature of the alternator")
@@ -310,14 +316,14 @@ auto engine_temp =
 
 
   // GNSS
-
+/* disable GNSS
   HardwareSerial* serial = &Serial1;
   serial->begin(kGNSSBitRate, SERIAL_8N1, kGNSSRxPin, kGNSSTxPin);
 
   NMEA0183IOTask* nmea0183_io_task = new NMEA0183IOTask(serial);
 
   ConnectGNSS(&nmea0183_io_task->parser_, new GNSSData());
-
+disable GNSS */
   //event_loop()->onAvailable(Serial1, [](){Serial.write(Serial1.read());  });
 //while (Serial1.available()) {
 //    char c = Serial1.read();
