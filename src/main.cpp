@@ -384,6 +384,7 @@ disable GNSS */
 
   ///////////////////////////////////////////////////////////////////
   // Digital tacho inputs
+  // multiplier for Paikea: 0.11400
 
   // Connect the tacho senders. Engine name is "0".
   auto tacho_d4_frequency = ConnectTachoSender(kDigitalInputPin4, "0");
