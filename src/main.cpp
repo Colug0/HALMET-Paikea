@@ -1,12 +1,4 @@
-// Signal K application template file.
-//
-// This application demonstrates core SensESP concepts in a very
-// concise manner. You can build and upload the application as is
-// and observe the value changes on the serial port monitor.
-//
-// You can use this source file as a basis for your own projects.
-// Remove the parts that are not relevant to you, and add your own code
-// for external hardware libraries.
+
 #define ENABLE_SIGNALK
 
 #include <Adafruit_ADS1X15.h>
@@ -36,7 +28,7 @@
 #include "M5UnitENV.h"
 #include "sensesp_nmea0183/nmea0183.h"
 #include "sensesp_nmea0183/wiring.h"
-
+//#include "sensesp/transforms/frequency.h"
 
 
 using namespace sensesp;
@@ -106,7 +98,6 @@ void setup() {
   sensesp_app = (&builder)
                     ->set_hostname("halmet")
                     ->set_wifi_client("Paikea", "2001BestesBootderWelt!")
-                    //->set_sk_server("192.168.88.100", 3000)
                     ->set_sk_server("192.168.88.111", 3000)
                     // EDIT: Enable OTA updates with a password.
                     ->enable_ota("!HalmetSecretWiFiOTApass")
@@ -385,7 +376,7 @@ disable GNSS */
   ///////////////////////////////////////////////////////////////////
   // Digital tacho inputs
   // multiplier for Paikea: 0.11400
-
+ //old rpm ->
   // Connect the tacho senders. Engine name is "0".
   auto tacho_d4_frequency = ConnectTachoSender(kDigitalInputPin4, "0");
 
@@ -400,7 +391,44 @@ disable GNSS */
       ->set_sort_order(3015);
 
   tacho_d4_frequency->connect_to(&(engine_rapid_sender->engine_speed_));
+  //<- old rpm   
 
+  /*// new rpm ->
+  const char* sk_path = "propulsion.0.revolutions";
+  const char* config_path = "/sensors/engine_rpm";
+
+
+  const char* config_path_calibrate = "/sensors/engine_rpm/calibrate";
+  const char* config_path_skpath = "/sensors/engine_rpm/sk";
+
+  //const float multiplier = 1.0 / 97.0;
+  const float multiplier = 0.11400;
+  const unsigned int read_delay_rpm = 500;
+
+
+  uint8_t pin = 4;
+
+  auto* sensor = new DigitalInputCounter(pin, INPUT_PULLUP, RISING, read_delay_rpm);
+
+  auto frequency = new Frequency(multiplier, config_path_calibrate);
+
+  ConfigItem(frequency)
+      ->set_title("Frequency")
+      ->set_description("Frequency of the engine RPM signal")
+      ->set_sort_order(1000);
+
+  auto frequency_sk_output = new SKOutput<float>(sk_path, config_path_skpath);
+
+  ConfigItem(frequency_sk_output)
+      ->set_title("Frequency SK Output Path")
+      ->set_sort_order(1001);
+
+  sensor
+      ->connect_to(frequency)             // connect the output of sensor
+                                          // to the input of Frequency()
+      ->connect_to(frequency_sk_output);  // connect the output of Frequency()
+                                          // to a Signal K Output as a number
+-> new rpm */
   ///////////////////////////////////////////////////////////////////
 
 
