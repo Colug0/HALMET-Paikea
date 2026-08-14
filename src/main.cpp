@@ -19,8 +19,20 @@
 //    halting the whole firmware forever with while(1) delay(1).
 //  - Removed dead/commented-out code (old NMEA2000 senders, disabled GNSS,
 //    duplicate RPM approaches).
+//  - Added an error-triggered reboot watchdog: counts "Websocket client is
+//    not connected" / "Delta send incomplete" log lines and force-reboots
+//    after kMaxWsErrorsBeforeReboot occurrences. Works around a SK
+//    websocket connection getting silently stuck (status page still says
+//    "Connected") that's been confirmed to still occur on SensESP v3.5.0.
 
 #include <Adafruit_ADS1X15.h>
+
+#include <atomic>
+#include <cstdarg>
+#include <cstdio>
+#include <cstring>
+
+#include "esp_log.h"
 
 #include "halmet_analog.h"
 #include "halmet_const.h"
@@ -66,6 +78,17 @@ bool sht4_ok = false;
 
 const adsGain_t kADS1115Gain = GAIN_ONE;
 
+// See the "Error-triggered reboot watchdog" section below for why this
+// exists. Lower it for a more trigger-happy watchdog, raise it if you find
+// isolated/transient errors cause unnecessary reboots.
+const int kMaxWsErrorsBeforeReboot = 5;
+
+// If more time than this passes between two WS errors, the counter resets
+// instead of accumulating - this way occasional, isolated blips (a brief
+// WiFi hiccup that recovers on its own) don't slowly add up to a reboot;
+// only a genuine burst of failures within this window does.
+const unsigned long kWsErrorWindowMs = 15UL * 60 * 1000;  // 15 minutes
+
 /////////////////////////////////////////////////////////////////////
 // Functions
 // Callback functions for i2c sensors. Guarded so a missing/failed sensor
@@ -85,12 +108,83 @@ float read_humid_callback() {
 }
 
 /////////////////////////////////////////////////////////////////////
+// Error-triggered reboot watchdog
+//
+// We've seen the SK connection get stuck: the status page reports
+// "Connected" and WiFi/uptime/free heap all look healthy, but the
+// underlying websocket has silently died and every send fails, filling
+// the log with:
+//   E (...) websocket_client: Websocket client is not connected
+//   W (...) signalk_ws_client.cpp: Delta send incomplete (result=-1); ...
+// This has been confirmed to still happen on the latest SensESP release
+// (v3.5.0), so it's a real, currently-open upstream issue rather than
+// something a version bump fixes on its own.
+//
+// Instead of a blind time-based reboot, we tap into the ESP-IDF logging
+// pipeline: every ESP_LOGx call is routed through a single vprintf-style
+// function, which we can chain our own handler into. We inspect each
+// formatted log line for the two error strings above, and count them
+// within a sliding time window (kWsErrorWindowMs) so isolated, self-
+// recovering blips don't accumulate into a false trigger - only a real
+// burst does. We force a clean reboot once the count reaches
+// kMaxWsErrorsBeforeReboot within that window. Every message is still
+// forwarded to the previous handler afterwards, so SensESP's own log
+// capture (the /api/log ring buffer) keeps working exactly as before - we
+// only observe, we don't swallow anything.
+static vprintf_like_t previous_log_vprintf = nullptr;
+static std::atomic<int> ws_error_count{0};
+static std::atomic<unsigned long> last_ws_error_ms{0};
+
+int WatchdogLoggingInterceptor(const char* fmt, va_list args) {
+  char buf[256];
+  va_list args_copy;
+  va_copy(args_copy, args);
+  vsnprintf(buf, sizeof(buf), fmt, args_copy);
+  va_end(args_copy);
+
+  if (strstr(buf, "Websocket client is not connected") != nullptr ||
+      strstr(buf, "Delta send incomplete") != nullptr) {
+    unsigned long now = millis();
+    unsigned long previous = last_ws_error_ms.load();
+    if (previous != 0 && (now - previous) > kWsErrorWindowMs) {
+      // It's been quiet for a while - this is a fresh burst, not a
+      // continuation of an old one. Start counting from zero again.
+      ws_error_count = 0;
+    }
+    last_ws_error_ms = now;
+
+    int count = ++ws_error_count;
+    if (count >= kMaxWsErrorsBeforeReboot) {
+      // Forward this final message first so it isn't lost, then reboot.
+      if (previous_log_vprintf != nullptr) {
+        previous_log_vprintf(fmt, args);
+      }
+      ESP_LOGW(__FILENAME__,
+               "%d SK websocket errors seen - rebooting to recover",
+               count);
+      delay(200);  // give the log messages time to flush
+      ESP.restart();
+    }
+  }
+
+  if (previous_log_vprintf != nullptr) {
+    return previous_log_vprintf(fmt, args);
+  }
+  return vprintf(fmt, args);
+}
+
+/////////////////////////////////////////////////////////////////////
 // The setup function performs one-time application initialization.
 void setup() {
   // ESP_LOG_VERBOSE floods the serial port and costs CPU time in normal
   // operation. Use ESP_LOG_INFO day-to-day and switch to DEBUG/VERBOSE only
   // while actively troubleshooting.
   SetupLogging(ESP_LOG_INFO);
+
+  // Install our error-counting watchdog. Must come after SetupLogging()
+  // so we capture (and chain to) whatever handler it already installed
+  // for the /api/log ring buffer.
+  previous_log_vprintf = esp_log_set_vprintf(WatchdogLoggingInterceptor);
 
   // Define how often SensESP should read the sensor(s), in milliseconds.
   uint read_delay = 1000;             // OneWire sensors
