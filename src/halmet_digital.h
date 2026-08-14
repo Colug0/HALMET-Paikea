@@ -3,9 +3,21 @@
 
 #include "sensesp/sensors/sensor.h"
 
-using namespace sensesp;
+namespace halmet {
 
-FloatProducer* ConnectTachoSender(int pin, String name);
-BoolProducer* ConnectAlarmSender(int pin, String name);
+/**
+ * @brief Connect a digital input pin as an engine tachometer and wire its
+ * frequency output directly to a Signal K path
+ * (propulsion.<name>.revolutions).
+ */
+sensesp::FloatProducer* ConnectTachoSender(int pin, String name);
+
+/**
+ * @brief Connect a digital input pin as a boolean alarm input and wire it
+ * directly to a Signal K path (alarm.<name>).
+ */
+sensesp::BoolProducer* ConnectAlarmSender(int pin, String name);
+
+}  // namespace halmet
 
 #endif
