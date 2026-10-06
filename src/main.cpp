@@ -19,20 +19,13 @@
 //    halting the whole firmware forever with while(1) delay(1).
 //  - Removed dead/commented-out code (old NMEA2000 senders, disabled GNSS,
 //    duplicate RPM approaches).
-//  - Added an error-triggered reboot watchdog: counts "Websocket client is
-//    not connected" / "Delta send incomplete" log lines and force-reboots
-//    after kMaxWsErrorsBeforeReboot occurrences. Works around a SK
-//    websocket connection getting silently stuck (status page still says
-//    "Connected") that's been confirmed to still occur on SensESP v3.5.0.
+//  - Added a delta-stall reboot watchdog: force-reboots if no delta has
+//    been successfully sent to Signal K for kSkStallTimeoutMs. Works around
+//    a SK websocket connection getting silently stuck (status page still
+//    says "Connected") that's been confirmed to still occur on SensESP
+//    v3.5.0.
 
 #include <Adafruit_ADS1X15.h>
-
-#include <atomic>
-#include <cstdarg>
-#include <cstdio>
-#include <cstring>
-
-#include "esp_log.h"
 
 #include "halmet_analog.h"
 #include "halmet_const.h"
@@ -78,16 +71,12 @@ bool sht4_ok = false;
 
 const adsGain_t kADS1115Gain = GAIN_ONE;
 
-// See the "Error-triggered reboot watchdog" section below for why this
-// exists. Lower it for a more trigger-happy watchdog, raise it if you find
-// isolated/transient errors cause unnecessary reboots.
-const int kMaxWsErrorsBeforeReboot = 5;
-
-// If more time than this passes between two WS errors, the counter resets
-// instead of accumulating - this way occasional, isolated blips (a brief
-// WiFi hiccup that recovers on its own) don't slowly add up to a reboot;
-// only a genuine burst of failures within this window does.
-const unsigned long kWsErrorWindowMs = 15UL * 60 * 1000;  // 15 minutes
+// See the "Delta-stall reboot watchdog" section below for why this exists.
+// If no delta has been successfully sent to Signal K for this long, reboot.
+// Sensors produce new values every 1-2 s, so in normal operation the delta
+// tx counter never stands still for more than a few seconds.
+const unsigned long kSkStallTimeoutMs = 5UL * 60 * 1000;  // 5 minutes
+const unsigned long kSkStallCheckIntervalMs = 10UL * 1000;  // 10 seconds
 
 /////////////////////////////////////////////////////////////////////
 // Functions
@@ -108,7 +97,7 @@ float read_humid_callback() {
 }
 
 /////////////////////////////////////////////////////////////////////
-// Error-triggered reboot watchdog
+// Delta-stall reboot watchdog
 //
 // We've seen the SK connection get stuck: the status page reports
 // "Connected" and WiFi/uptime/free heap all look healthy, but the
@@ -117,60 +106,40 @@ float read_humid_callback() {
 //   E (...) websocket_client: Websocket client is not connected
 //   W (...) signalk_ws_client.cpp: Delta send incomplete (result=-1); ...
 // This has been confirmed to still happen on the latest SensESP release
-// (v3.5.0), so it's a real, currently-open upstream issue rather than
-// something a version bump fixes on its own.
+// (v3.5.0), so it's a real, currently-open upstream issue.
 //
-// Instead of a blind time-based reboot, we tap into the ESP-IDF logging
-// pipeline: every ESP_LOGx call is routed through a single vprintf-style
-// function, which we can chain our own handler into. We inspect each
-// formatted log line for the two error strings above, and count them
-// within a sliding time window (kWsErrorWindowMs) so isolated, self-
-// recovering blips don't accumulate into a false trigger - only a real
-// burst does. We force a clean reboot once the count reaches
-// kMaxWsErrorsBeforeReboot within that window. Every message is still
-// forwarded to the previous handler afterwards, so SensESP's own log
-// capture (the /api/log ring buffer) keeps working exactly as before - we
-// only observe, we don't swallow anything.
-static vprintf_like_t previous_log_vprintf = nullptr;
-static std::atomic<int> ws_error_count{0};
-static std::atomic<unsigned long> last_ws_error_ms{0};
+// An earlier version hooked esp_log_set_vprintf() and counted those log
+// lines, but that never fired: SensESP's LogBuffer installs its own hook
+// later (in SensESPApp::setup()) and writes formatted lines straight to
+// stdout without calling the previously installed handler.
+//
+// Instead we watch the outcome directly: SensESP's delta tx counter only
+// increments on a successful esp_websocket_client_send_text(). If it hasn't
+// moved for kSkStallTimeoutMs, whatever the reported connection state, the
+// SK link is effectively dead and we reboot. This also covers a long SK
+// server outage (one reboot per kSkStallTimeoutMs), which is harmless.
+void SetupDeltaStallWatchdog() {
+  static int last_tx_count = -1;
+  static unsigned long last_progress_ms = millis();
 
-int WatchdogLoggingInterceptor(const char* fmt, va_list args) {
-  char buf[256];
-  va_list args_copy;
-  va_copy(args_copy, args);
-  vsnprintf(buf, sizeof(buf), fmt, args_copy);
-  va_end(args_copy);
-
-  if (strstr(buf, "Websocket client is not connected") != nullptr ||
-      strstr(buf, "Delta send incomplete") != nullptr) {
+  event_loop()->onRepeat(kSkStallCheckIntervalMs, []() {
+    int tx_count =
+        sensesp_app->get_ws_client()->get_delta_tx_count_producer().get();
     unsigned long now = millis();
-    unsigned long previous = last_ws_error_ms.load();
-    if (previous != 0 && (now - previous) > kWsErrorWindowMs) {
-      // It's been quiet for a while - this is a fresh burst, not a
-      // continuation of an old one. Start counting from zero again.
-      ws_error_count = 0;
+    if (tx_count != last_tx_count) {
+      last_tx_count = tx_count;
+      last_progress_ms = now;
+      return;
     }
-    last_ws_error_ms = now;
-
-    int count = ++ws_error_count;
-    if (count >= kMaxWsErrorsBeforeReboot) {
-      // Forward this final message first so it isn't lost, then reboot.
-      if (previous_log_vprintf != nullptr) {
-        previous_log_vprintf(fmt, args);
-      }
-      ESP_LOGW(__FILENAME__,
-               "%d SK websocket errors seen - rebooting to recover",
-               count);
-      delay(200);  // give the log messages time to flush
+    if (now - last_progress_ms >= kSkStallTimeoutMs) {
+      ESP_LOGE(__FILENAME__,
+               "No SK delta sent for %lu s (tx count stuck at %d) - "
+               "rebooting to recover",
+               (now - last_progress_ms) / 1000, tx_count);
+      delay(200);  // give the log message time to flush
       ESP.restart();
     }
-  }
-
-  if (previous_log_vprintf != nullptr) {
-    return previous_log_vprintf(fmt, args);
-  }
-  return vprintf(fmt, args);
+  });
 }
 
 /////////////////////////////////////////////////////////////////////
@@ -180,11 +149,6 @@ void setup() {
   // operation. Use ESP_LOG_INFO day-to-day and switch to DEBUG/VERBOSE only
   // while actively troubleshooting.
   SetupLogging(ESP_LOG_INFO);
-
-  // Install our error-counting watchdog. Must come after SetupLogging()
-  // so we capture (and chain to) whatever handler it already installed
-  // for the /api/log ring buffer.
-  previous_log_vprintf = esp_log_set_vprintf(WatchdogLoggingInterceptor);
 
   // Define how often SensESP should read the sensor(s), in milliseconds.
   uint read_delay = 1000;             // OneWire sensors
@@ -223,6 +187,8 @@ void setup() {
   // Disable WiFi modem sleep. Power-save mode is a common contributor to
   // long-lived connections quietly dying on the ESP32.
   WiFi.setSleep(false);
+
+  SetupDeltaStallWatchdog();
 
   // Initialize the I2C bus at 400kHz - the BMP280/SHT4x below re-run
   // Wire.begin() internally regardless (that's just how the M5Unit-ENV
