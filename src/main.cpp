@@ -19,11 +19,12 @@
 //    halting the whole firmware forever with while(1) delay(1).
 //  - Removed dead/commented-out code (old NMEA2000 senders, disabled GNSS,
 //    duplicate RPM approaches).
-//  - Added a delta-stall reboot watchdog: force-reboots if no delta has
-//    been successfully sent to Signal K for kSkStallTimeoutMs. Works around
-//    a SK websocket connection getting silently stuck (status page still
-//    says "Connected") that's been confirmed to still occur on SensESP
-//    v3.5.0.
+//  - Added a delta-stall watchdog: if no delta has been successfully sent
+//    to Signal K for kSkStallTimeoutMs, it first rebuilds the SK websocket
+//    client, and only reboots if that hasn't helped by kSkRebootTimeoutMs.
+//    Works around a SK websocket connection getting silently stuck (status
+//    page still says "Connected") that's been confirmed to still occur on
+//    SensESP v3.5.0.
 
 #include <Adafruit_ADS1X15.h>
 
@@ -71,11 +72,15 @@ bool sht4_ok = false;
 
 const adsGain_t kADS1115Gain = GAIN_ONE;
 
-// See the "Delta-stall reboot watchdog" section below for why this exists.
-// If no delta has been successfully sent to Signal K for this long, reboot.
+// See the "Delta-stall watchdog" section below for why this exists.
 // Sensors produce new values every 1-2 s, so in normal operation the delta
 // tx counter never stands still for more than a few seconds.
-const unsigned long kSkStallTimeoutMs = 5UL * 60 * 1000;  // 5 minutes
+//
+// If no delta has been sent for kSkStallTimeoutMs, rebuild the SK websocket
+// client (repeated every kSkStallTimeoutMs while the stall lasts). If the
+// stall still persists after kSkRebootTimeoutMs, reboot the whole board.
+const unsigned long kSkStallTimeoutMs = 3UL * 60 * 1000;    // 3 minutes
+const unsigned long kSkRebootTimeoutMs = 15UL * 60 * 1000;  // 15 minutes
 const unsigned long kSkStallCheckIntervalMs = 10UL * 1000;  // 10 seconds
 
 /////////////////////////////////////////////////////////////////////
@@ -97,7 +102,7 @@ float read_humid_callback() {
 }
 
 /////////////////////////////////////////////////////////////////////
-// Delta-stall reboot watchdog
+// Delta-stall watchdog
 //
 // We've seen the SK connection get stuck: the status page reports
 // "Connected" and WiFi/uptime/free heap all look healthy, but the
@@ -108,36 +113,73 @@ float read_humid_callback() {
 // This has been confirmed to still happen on the latest SensESP release
 // (v3.5.0), so it's a real, currently-open upstream issue.
 //
-// An earlier version hooked esp_log_set_vprintf() and counted those log
+// One known way into this state: when the server sends a websocket CLOSE
+// frame, esp_websocket_client (with enable_close_reconnect unset, as
+// SensESP leaves it) stops its task and dispatches only
+// WEBSOCKET_EVENT_CLOSED, which SensESP's event handler ignores - so
+// SensESP stays "Connected" and never reconnects. That path logs
+// "Did not get TCP close within expected delay" or "Connection terminated
+// while waiting for clean TCP close" from websocket_client just before the
+// errors start. A plain SK server restart (TCP FIN, no CLOSE frame) is
+// handled fine by SensESP and does not trigger this.
+//
+// An earlier version hooked esp_log_set_vprintf() and counted the error log
 // lines, but that never fired: SensESP's LogBuffer installs its own hook
 // later (in SensESPApp::setup()) and writes formatted lines straight to
 // stdout without calling the previously installed handler.
 //
 // Instead we watch the outcome directly: SensESP's delta tx counter only
-// increments on a successful esp_websocket_client_send_text(). If it hasn't
-// moved for kSkStallTimeoutMs, whatever the reported connection state, the
-// SK link is effectively dead and we reboot. This also covers a long SK
-// server outage (one reboot per kSkStallTimeoutMs), which is harmless.
+// increments on a successful esp_websocket_client_send_text(). If it stands
+// still for kSkStallTimeoutMs, whatever the reported connection state, we
+// rebuild the SK websocket client via SKWSClient::restart() (sets the state
+// to Disconnected and tears the client down, so SensESP's normal connect
+// logic starts over). That recovers without losing the /api/log buffer, so
+// the lines leading up to the stall can still be inspected afterwards. Only
+// if the stall outlasts kSkRebootTimeoutMs do we reboot. A long SK server
+// outage therefore causes one reboot per kSkRebootTimeoutMs, which is
+// harmless.
 void SetupDeltaStallWatchdog() {
   static int last_tx_count = -1;
   static unsigned long last_progress_ms = millis();
+  static unsigned long last_client_restart_ms = 0;
 
   event_loop()->onRepeat(kSkStallCheckIntervalMs, []() {
-    int tx_count =
-        sensesp_app->get_ws_client()->get_delta_tx_count_producer().get();
+    auto ws_client = sensesp_app->get_ws_client();
+    int tx_count = ws_client->get_delta_tx_count_producer().get();
     unsigned long now = millis();
     if (tx_count != last_tx_count) {
+      if (last_client_restart_ms != 0) {
+        ESP_LOGI(__FILENAME__, "SK deltas flowing again after %lu s stall",
+                 (now - last_progress_ms) / 1000);
+        last_client_restart_ms = 0;
+      }
       last_tx_count = tx_count;
       last_progress_ms = now;
       return;
     }
-    if (now - last_progress_ms >= kSkStallTimeoutMs) {
+
+    unsigned long stalled_ms = now - last_progress_ms;
+
+    if (stalled_ms >= kSkRebootTimeoutMs) {
       ESP_LOGE(__FILENAME__,
-               "No SK delta sent for %lu s (tx count stuck at %d) - "
-               "rebooting to recover",
-               (now - last_progress_ms) / 1000, tx_count);
+               "No SK delta sent for %lu s (tx count stuck at %d, SK state "
+               "'%s') - rebooting to recover",
+               stalled_ms / 1000, tx_count,
+               ws_client->get_connection_status().c_str());
       delay(200);  // give the log message time to flush
       ESP.restart();
+    }
+
+    if (stalled_ms >= kSkStallTimeoutMs &&
+        (last_client_restart_ms == 0 ||
+         now - last_client_restart_ms >= kSkStallTimeoutMs)) {
+      ESP_LOGE(__FILENAME__,
+               "Delta stall detected: no SK delta sent for %lu s (tx count "
+               "stuck at %d, SK state '%s') - restarting SK client",
+               stalled_ms / 1000, tx_count,
+               ws_client->get_connection_status().c_str());
+      last_client_restart_ms = now;
+      ws_client->restart();
     }
   });
 }
